@@ -1,5 +1,9 @@
 # hltb-client
 
+[![npm version](https://img.shields.io/npm/v/hltb-client.svg)](https://www.npmjs.com/package/hltb-client)
+[![npm downloads](https://img.shields.io/npm/dm/hltb-client.svg)](https://www.npmjs.com/package/hltb-client)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A TypeScript client for the [HowLongToBeat](https://howlongtobeat.com) API. Get game completion times programmatically.
 
 ## Installation

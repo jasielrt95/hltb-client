@@ -1,0 +1,51 @@
+{
+  "name": "hltb-client",
+  "version": "1.0.0",
+  "description": "A TypeScript client for the HowLongToBeat API. Get game completion times programmatically.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasielrt95/hltb-client.git"
+  },
+  "keywords": [
+    "howlongtobeat",
+    "hltb",
+    "games",
+    "gaming",
+    "api",
+    "client",
+    "completion-time",
+    "game-length",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jasielrt95/hltb-client/issues"
+  },
+  "homepage": "https://github.com/jasielrt95/hltb-client#readme",
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": false
+}

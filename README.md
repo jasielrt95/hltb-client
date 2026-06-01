@@ -170,8 +170,8 @@ try {
 
 This client interfaces with HowLongToBeat's internal API:
 
-1. Fetches an authentication token from `/api/search/init`
-2. Uses the token to make search requests to `/api/search`
+1. Fetches an authentication token and honeypot metadata from `/api/bleed/init`
+2. Uses that token and honeypot metadata to make search requests to `/api/bleed`
 3. Caches tokens for 1 hour to minimize requests
 
 ## Rate Limiting

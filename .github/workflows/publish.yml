@@ -16,7 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm config delete //registry.npmjs.org/:_authToken
 
       - run: npm ci
       - run: npm run build
-      - run: npm publish --access public
+      - run: npm publish --provenance --access public

@@ -11,6 +11,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +24,12 @@ jobs:
       # Trusted publishing (OIDC) needs npm 11.5.1+; Node 22 ships npm 10.
       - run: npm install -g npm@latest
 
-      - run: npm config delete //registry.npmjs.org/:_authToken
+      # With no NPM_TOKEN secret, drop the empty token so npm uses OIDC trusted publishing.
+      - if: env.HAS_NPM_TOKEN != 'true'
+        run: npm config delete //registry.npmjs.org/:_authToken
 
       - run: npm ci
       - run: npm run build
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

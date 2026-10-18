@@ -8,8 +8,11 @@ import {
 } from './types';
 
 const HLTB_BASE_URL = 'https://howlongtobeat.com';
-const HLTB_SEARCH_URL = `${HLTB_BASE_URL}/api/bleed`;
-const HLTB_INIT_URL = `${HLTB_BASE_URL}/api/bleed/init`;
+// HLTB renames this endpoint from time to time (/api/bleed → /api/search/site in
+// Oct 2026). When it 404s, the client looks up the current path in the site's
+// own bundle (see discoverSearchPath).
+const DEFAULT_SEARCH_PATH = '/api/search/site';
+const DISCOVERY_COOLDOWN = 600000; // 10 minutes between endpoint lookups
 
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -25,8 +28,28 @@ export interface HLTBClientOptions {
 
 interface HLTBSecurityToken {
   token: string;
-  hpKey: string;
-  hpVal: string;
+  // Older versions of the site paired the token with a honeypot key/value that
+  // had to be echoed back; the current one doesn't, so these are optional.
+  hpKey?: string;
+  hpVal?: string;
+}
+
+/**
+ * Finds the search endpoint in a script from HLTB's site, which fetches its
+ * token from e.g. `/api/search/site/init?t=${Date.now()}`.
+ */
+export function findSearchPathInScript(script: string): string | null {
+  const match = /["'`](\/api\/[A-Za-z0-9_\-/]+?)\/init\?t=/.exec(script);
+  return match ? match[1] : null;
+}
+
+/** Script chunk paths referenced by HLTB's homepage HTML. */
+export function findScriptChunks(html: string): string[] {
+  const chunks = new Set<string>();
+  for (const match of html.matchAll(/["'](\/_next\/static\/chunks\/[^"']+\.js)["']/g)) {
+    chunks.add(match[1]);
+  }
+  return [...chunks];
 }
 
 /**
@@ -57,6 +80,8 @@ export class HLTBClient {
   private authToken: HLTBSecurityToken | null = null;
   private authTokenExpiry: number = 0;
   private tokenRefreshPromise: Promise<HLTBSecurityToken> | null = null;
+  private searchPath = DEFAULT_SEARCH_PATH;
+  private lastDiscoveryAt = 0;
   private readonly userAgent: string;
   private readonly tokenCacheDuration: number;
   private readonly axios: AxiosInstance;
@@ -97,20 +122,18 @@ export class HLTBClient {
 
   private async refreshToken(): Promise<HLTBSecurityToken> {
     try {
-      const response = await this.axios.get(`${HLTB_INIT_URL}?t=${Date.now()}`);
+      const response = await this.axios.get(`${HLTB_BASE_URL}${this.searchPath}/init?t=${Date.now()}`);
       const token = response.data?.token;
       const hpKey = response.data?.hpKey;
       const hpVal = response.data?.hpVal;
 
-      if (
-        !token || typeof token !== 'string' ||
-        !hpKey || typeof hpKey !== 'string' ||
-        !hpVal || typeof hpVal !== 'string'
-      ) {
+      if (!token || typeof token !== 'string') {
         throw new HLTBError('Invalid token response from HLTB');
       }
 
-      this.authToken = { token, hpKey, hpVal };
+      this.authToken = typeof hpKey === 'string' && hpKey && typeof hpVal === 'string'
+        ? { token, hpKey, hpVal }
+        : { token };
       this.authTokenExpiry = Date.now() + this.tokenCacheDuration;
 
       return this.authToken;
@@ -139,64 +162,104 @@ export class HLTBClient {
 
     const { limit = 20, platform = '', sortBy = 'popular' } = options;
 
-    const authToken = await this.getAuthToken();
-
-    const payload = this.buildSearchPayload(query, limit, platform, sortBy, authToken);
-
     try {
-      const response = await this.axios.post<HLTBSearchResponse>(
-        HLTB_SEARCH_URL,
-        payload,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': '*/*',
-            'x-auth-token': authToken.token,
-            'x-hp-key': authToken.hpKey,
-            'x-hp-val': authToken.hpVal
-          }
-        }
-      );
-
-      if (!response.data?.data || !Array.isArray(response.data.data)) {
-        return [];
-      }
-
-      return response.data.data.map((game) => this.transformGame(game));
+      return await this.searchWithTokenRetry(query, limit, platform, sortBy);
     } catch (error) {
-      // If we get a 401/403, clear the token and retry once
-      if (this.isAuthError(error)) {
-        this.clearToken();
-        const newToken = await this.getAuthToken();
-        const retryPayload = this.buildSearchPayload(query, limit, platform, sortBy, newToken);
-
+      // A 404 means HLTB moved the endpoint: find the new one and try once more.
+      if (this.statusOf(error) === 404 && await this.discoverSearchPath()) {
         try {
-          const response = await this.axios.post<HLTBSearchResponse>(
-            HLTB_SEARCH_URL,
-            retryPayload,
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': '*/*',
-                'x-auth-token': newToken.token,
-                'x-hp-key': newToken.hpKey,
-                'x-hp-val': newToken.hpVal
-              }
-            }
-          );
-
-          if (!response.data?.data || !Array.isArray(response.data.data)) {
-            return [];
-          }
-
-          return response.data.data.map((game) => this.transformGame(game));
+          return await this.searchWithTokenRetry(query, limit, platform, sortBy);
         } catch (retryError) {
-          this.handleError(retryError, 'Search failed after token refresh');
+          this.handleError(retryError, 'Search failed after endpoint discovery');
         }
       }
-
       this.handleError(error, 'Search request failed');
     }
+  }
+
+  private async searchWithTokenRetry(
+    query: string,
+    limit: number,
+    platform: string,
+    sortBy: HLTBSearchOptions['sortBy']
+  ): Promise<HLTBGame[]> {
+    try {
+      return await this.postSearch(query, limit, platform, sortBy, await this.getAuthToken());
+    } catch (error) {
+      // An expired token comes back as 401/403: refresh it and retry once.
+      if (!this.isAuthError(error)) {
+        throw error;
+      }
+      this.clearToken();
+      return this.postSearch(query, limit, platform, sortBy, await this.getAuthToken());
+    }
+  }
+
+  private async postSearch(
+    query: string,
+    limit: number,
+    platform: string,
+    sortBy: HLTBSearchOptions['sortBy'],
+    authToken: HLTBSecurityToken
+  ): Promise<HLTBGame[]> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': '*/*',
+      'x-auth-token': authToken.token
+    };
+    if (authToken.hpKey && authToken.hpVal) {
+      headers['x-hp-key'] = authToken.hpKey;
+      headers['x-hp-val'] = authToken.hpVal;
+    }
+
+    const response = await this.axios.post<HLTBSearchResponse>(
+      `${HLTB_BASE_URL}${this.searchPath}`,
+      this.buildSearchPayload(query, limit, platform, sortBy, authToken),
+      { headers }
+    );
+
+    if (!response.data?.data || !Array.isArray(response.data.data)) {
+      return [];
+    }
+
+    return response.data.data.map((game) => this.transformGame(game));
+  }
+
+  /**
+   * Reads HLTB's homepage and script chunks to find the current search
+   * endpoint. Returns true when a different path was found and adopted.
+   */
+  private async discoverSearchPath(): Promise<boolean> {
+    if (Date.now() - this.lastDiscoveryAt < DISCOVERY_COOLDOWN) {
+      return false;
+    }
+    this.lastDiscoveryAt = Date.now();
+
+    try {
+      const { data: html } = await this.axios.get<string>(`${HLTB_BASE_URL}/`, { responseType: 'text' });
+      for (const chunk of findScriptChunks(html)) {
+        const { data: script } = await this.axios.get<string>(`${HLTB_BASE_URL}${chunk}`, { responseType: 'text' });
+        const path = findSearchPathInScript(script);
+        if (path) {
+          if (path === this.searchPath) {
+            return false;
+          }
+          this.searchPath = path;
+          this.clearToken();
+          return true;
+        }
+      }
+    } catch {
+      // Discovery is best effort; the original error is reported instead.
+    }
+    return false;
+  }
+
+  private statusOf(error: unknown): number | undefined {
+    if (error instanceof HLTBError) {
+      return error.statusCode;
+    }
+    return error instanceof AxiosError ? error.response?.status : undefined;
   }
 
   /**
@@ -297,7 +360,9 @@ export class HLTBClient {
     sortBy: HLTBSearchOptions['sortBy'],
     authToken: HLTBSecurityToken
   ): Record<string, unknown> {
-    return {
+    // Filters use { mode, values } since the site's Oct 2026 redesign.
+    const any = () => ({ mode: 'include', values: [] as string[] });
+    const payload: Record<string, unknown> = {
       searchType: 'games',
       searchTerms: query.trim().split(/\s+/),
       searchPage: 1,
@@ -305,12 +370,12 @@ export class HLTBClient {
       searchOptions: {
         games: {
           userId: 0,
-          platform,
+          platform: { mode: 'include', values: platform ? [platform] : [] },
           sortCategory: sortBy,
           rangeCategory: 'main',
           rangeTime: { min: null, max: null },
-          gameplay: { perspective: '', flow: '', genre: '', difficulty: '' },
-          rangeYear: { min: '', max: '' },
+          gameplay: { perspective: any(), flow: any(), genre: any() },
+          year: any(),
           modifier: ''
         },
         users: { sortCategory: 'postcount' },
@@ -319,8 +384,11 @@ export class HLTBClient {
         sort: 0,
         randomizer: 0
       },
-      useCache: true,
-      [authToken.hpKey]: authToken.hpVal
+      useCache: true
     };
+    if (authToken.hpKey && authToken.hpVal) {
+      payload[authToken.hpKey] = authToken.hpVal;
+    }
+    return payload;
   }
 }

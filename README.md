@@ -170,9 +170,10 @@ try {
 
 This client interfaces with HowLongToBeat's internal API:
 
-1. Fetches an authentication token and honeypot metadata from `/api/bleed/init`
-2. Uses that token and honeypot metadata to make search requests to `/api/bleed`
-3. Caches tokens for 1 hour to minimize requests
+1. Fetches an authentication token from `/api/search/site/init`
+2. Sends search requests to `/api/search/site` with the token in the `x-auth-token` header (and the honeypot key/value too, if the site returns one)
+3. Caches tokens for 1 hour to minimize requests, and refreshes once on a 401/403
+4. If the endpoint returns 404 (HLTB renames it from time to time; it was `/api/bleed` until October 2026), reads the current path from the site's own JavaScript and retries, at most once every 10 minutes
 
 ## Rate Limiting
 

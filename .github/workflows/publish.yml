@@ -3,6 +3,7 @@ name: Publish to npm
 on:
   release:
     types: [created]
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -17,6 +18,9 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) needs npm 11.5.1+; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
 
       - run: npm config delete //registry.npmjs.org/:_authToken
 
